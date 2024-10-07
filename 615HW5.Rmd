@@ -1,0 +1,33 @@
+---
+title: "615HW5"
+output: pdf_document
+date: "2024-10-05"
+author: "Chang Lu"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+# Load the dataset
+strawberry_data <- read.csv("strawberries25_v3.csv")
+
+# Splitting the 'Domain' column into separate components
+library(dplyr)
+library(tidyr)
+
+# Use separate to split the Domain column into "Chemical_Type", "Chemical_Name", and "Chemical_Code"
+strawberry_data_cleaned <- strawberry_data %>%
+  separate(Domain, into = c("Chemical_Type", "Chemical_Name"), sep = ", ", extra = "merge", fill = "right") %>%
+  separate(Chemical_Name, into = c("Chemical_Name", "Chemical_Code"), sep = " = ", fill = "right")
+
+# If necessary, you can filter rows to remove non-chemical entries if they are not relevant:
+strawberry_data_cleaned <- strawberry_data_cleaned %>%
+  filter(!is.na(Chemical_Type)) # Retain only rows where Chemical_Type is not NA
+
+# Check the cleaned dataset
+head(strawberry_data_cleaned)
+
+# Save the cleaned dataset
+write.csv(strawberry_data_cleaned, "strawberries_cleaned.csv", row.names = FALSE)
+```
