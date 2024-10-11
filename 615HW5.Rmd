@@ -7,27 +7,283 @@ author: "Chang Lu"
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(knitr)  
+library(kableExtra)
+library(tidyverse)
+library(rstanarm)
 ```
+
+## 615 Strawberry data cleaning
 ```{r}
-# Load the dataset
-strawberry_data <- read.csv("strawberries25_v3.csv")
+#| label: read data - glimpse 
 
-# Splitting the 'Domain' column into separate components
-library(dplyr)
-library(tidyr)
+# Load the strawberry dataset and take a glimpse at the data
+strawberry_data <- read_csv("strawberries25_v3.csv", col_names = TRUE)
+glimpse(strawberry_data)
+```
 
-# Use separate to split the Domain column into "Chemical_Type", "Chemical_Name", and "Chemical_Code"
-strawberry_data_cleaned <- strawberry_data %>%
-  separate(Domain, into = c("Chemical_Type", "Chemical_Name"), sep = ", ", extra = "merge", fill = "right") %>%
-  separate(Chemical_Name, into = c("Chemical_Name", "Chemical_Code"), sep = " = ", fill = "right")
+### Explanation
+Dataset Overview: The `strawberry_data` contains 12,699 rows and 21 columns. Columns include information like date, location, values, and coefficients of variation.
 
-# If necessary, you can filter rows to remove non-chemical entries if they are not relevant:
-strawberry_data_cleaned <- strawberry_data_cleaned %>%
-  filter(!is.na(Chemical_Type)) # Retain only rows where Chemical_Type is not NA
+### Remove Columns with Single Value in All Rows
 
-# Check the cleaned dataset
-head(strawberry_data_cleaned)
+```{r}
+#|label: function def - drop 1-item columns
 
-# Save the cleaned dataset
-write.csv(strawberry_data_cleaned, "strawberries_cleaned.csv", row.names = FALSE)
+# Function to remove columns with only a single unique value
+drop_one_value_col <- function(df) {   
+  drop <- NULL
+  
+  # Test each column for a single value
+  for (i in 1:ncol(df)) {    
+    if (n_distinct(df[[i]]) == 1) {
+      drop <- c(drop, i)
+    }
+  }
+  
+  # Report the result - names of columns dropped
+  if (is.null(drop)) {
+    return(df)
+  } else {
+    print("Columns dropped:")
+    print(colnames(df)[drop])
+    df <- df[, -drop]
+  }
+}
+
+# Use the function to remove single-value columns
+strawberry_data <- drop_one_value_col(strawberry_data)
+glimpse(strawberry_data)
+```
+
+### Separate Composite Columns
+
+```{r}
+#|label: split Data Item
+
+# Split 'Data Item' column into two parts using delimiter '-'
+strawberry_data <- strawberry_data |>
+  separate_wider_delim(  cols = `Data Item`,
+                         delim = "-",
+                         names = c("column1", "column2"),
+                         too_many = "merge",
+                         too_few = "align_start")
+
+# Further split 'column1' into 'Fruit' and 'Category' using delimiter ','
+strawberry_data <- strawberry_data |>
+  separate_wider_delim(  cols = `column1`,
+                         delim = ",",
+                         names = c("Fruit", "Category"),
+                         too_many = "merge",
+                         too_few = "align_start")
+
+# Trim white spaces from the split columns
+strawberry_data$Fruit <- str_trim(strawberry_data$Fruit, side = "both")
+strawberry_data$Category <- str_trim(strawberry_data$Category, side = "both")
+strawberry_data$column2 <- str_trim(strawberry_data$column2, side = "both")
+
+# Remove columns with single-value again after modifications
+strawberry_data <- drop_one_value_col(strawberry_data)
+unique(strawberry_data$Category)
+```
+
+### Clean Data in the 'Category' Column
+
+```{r}
+#|label: Clean data in the Category
+
+# Extract specific attributes from 'Category' and assign them to new columns
+strawberry_data <- strawberry_data %>%
+  mutate(Marketing_channels = ifelse(str_detect(Category, "FRESH MARKET|PROCESSING"),
+                                      str_extract(Category, "FRESH MARKET|PROCESSING"), NA)) %>%
+  mutate(Utilizations = ifelse(str_detect(Category, "UTILIZED"),
+                               str_extract(Category, "UTILIZED"), NA)) %>%
+  mutate(Method = ifelse(str_detect(Category, "ORGANIC"),
+                         str_extract(Category, "ORGANIC"), NA)) %>%
+  mutate(Class = ifelse(str_detect(Category, "BEARING"),
+                        str_extract(Category, "BEARING"), NA)) %>%
+  mutate(Measurement = ifelse(str_detect(Category, "NOT SOLD"),
+                              str_extract(Category, "NOT SOLD"), NA)) %>% 
+  select(1:match("County ANSI", names(.)), Class, Method, Marketing_channels, Utilizations, Measurement, column2, everything()) %>% 
+  select(-Category)
+```
+
+### Clean Data in 'column2'
+
+```{r}
+#|label: Clean column2
+
+# Split 'column2' into 'Measurement1' and 'Metric1'
+strawberry_data <- strawberry_data %>%
+  mutate(
+    Measurement1 = ifelse(str_detect(column2, ","),
+                          str_split_fixed(column2, ",", 2)[, 1],
+                          column2),  
+    Metric1 = ifelse(str_detect(column2, ","),
+                    str_split_fixed(column2, ",", 2)[, 2],
+                    NA) 
+  ) %>% 
+  select(1:match("Measurement", names(.)), Measurement1, Metric1, everything()) %>% 
+  select(-column2)
+```
+
+### Classify Strings in Their Positions
+
+```{r}
+#|label: classify strings
+
+# Extract specific strings from 'Metric1' to 'Metric' and 'Remark'
+strawberry_data <- strawberry_data %>%
+  mutate(Metric = str_extract(Metric1, "(?<=,|^)[^,]*MEASURED IN[^,]*(?=,|$)")) %>%
+  mutate(Remark = str_remove_all(Metric1, "(?<=,|^)[^,]*MEASURED IN[^,]*(,)?")) %>%
+  mutate(Remark = str_trim(str_replace_all(Remark, "^,|,$|,,", ""))) %>%
+  select(1:match("Measurement1", names(.)), Metric, Remark, everything())  %>% 
+  select(-Metric1)
+
+# Create 'Category' column by combining 'Measurement' and 'Measurement1'
+strawberry_data <- strawberry_data %>%
+  mutate(Category = ifelse(is.na(Measurement), 
+                           Measurement1,
+                           paste(Measurement, Measurement1, sep = " "))) %>% 
+  select(1:match("Utilizations", names(.)), Category, everything()) %>% 
+  select(-Measurement, -Measurement1)
+
+# Trim whitespace
+strawberry_data$Metric <- str_trim(strawberry_data$Metric, side = "both")
+strawberry_data$Category <- str_trim(strawberry_data$Category, side = "both")
+
+# Replace empty strings in 'Remark' with NA
+strawberry_data <- strawberry_data %>% mutate(across(Remark, ~ na_if(., "")))
+glimpse(strawberry_data)
+```
+
+### Separate Domain and Domain Category
+
+```{r}
+#|label: separate domain category
+
+# Clean up 'Domain Category' by removing redundant text and characters
+strawberry_data <- strawberry_data %>%
+  mutate(`Domain Category` = ifelse(str_detect(`Domain Category`, ":"),
+                              str_split_fixed(`Domain Category`, ":", 2)[, 2],
+                              `Domain Category`)) %>%
+  mutate(`Domain Category` = str_replace_all(`Domain Category`, "[\\(\\)]", ""))
+
+strawberry_data$`Domain Category` <- str_trim(strawberry_data$`Domain Category`, side = "both")
+
+# Separate 'Domain Category' into specific chemical and numbers
+strawberry_data <- strawberry_data %>%
+  mutate(Chemical_Number = ifelse(str_detect(`Domain Category`, "="),
+                                  str_split_fixed(`Domain Category`, "=", 2)[, 2], 
+                                  NA)) %>%
+  mutate(`Domain Category` = ifelse(str_detect(`Domain Category`, "="),
+                              str_split_fixed(`Domain Category`, "=", 2)[, 1],  
+                              `Domain Category`)) %>% 
+  select(1:match("Domain Category", names(.)), Chemical_Number, everything())
+
+# Trim whitespace
+strawberry_data$`Domain Category` <- str_trim(strawberry_data$`Domain Category`, side = "both")
+strawberry_data$Chemical_Number <- str_trim(strawberry_data$Chemical_Number, side = "both")
+
+# Remove 'CHEMICAL' from the 'Domain' column
+strawberry_data <- strawberry_data %>%
+  mutate(Domain = str_replace(Domain, "CHEMICAL, ", ""))
+glimpse(strawberry_data)
+```
+
+### Transfer Data Types to Correct Types
+
+```{r}
+#|label: transfer data types
+
+# Replace specific strings in 'Value' and 'CV (%)' columns and convert to numeric
+strawberry_data <- strawberry_data %>%
+  mutate(Value = ifelse(Value %in% c("(D)", "(NA)"), NA, Value)) %>%
+  mutate(Value = ifelse(Value == "(Z)", "0.0005", Value)) %>% 
+  mutate(Value = str_replace_all(Value,",","")) %>% 
+  mutate(Value = as.numeric(Value))
+
+strawberry_data <- strawberry_data %>%
+  mutate(`CV (%)` = ifelse(`CV (%)` %in% c("(D)", "(NA)"), NA, `CV (%)`)) %>%
+  mutate(`CV (%)` = ifelse(`CV (%)` == "(L)", "0.05", `CV (%)`)) %>% 
+  mutate(`CV (%)` = ifelse(`CV (%)` == "(H)", "99.95", `CV (%)`)) %>% 
+  mutate(`CV (%)` = str_replace_all(`CV (%)`,",","")) %>% 
+  mutate(`CV (%)` = as.numeric(`CV (%)`))
+glimpse(strawberry_data)
+```
+
+### Separate the Data into Categories
+
+```{r}
+#|label: separate data categories
+
+# Split the table into 'census' and 'survey'
+strawberry_census <- strawberry_data %>% filter(Program == "CENSUS")
+strawberry_survey <- strawberry_data %>% filter(Program == "SURVEY")
+strawberry_census <- drop_one_value_col(strawberry_census)
+strawberry_survey <- drop_one_value_col(strawberry_survey)
+
+# Split the 'census' table into 'organic' and 'non-organic'
+strawberry_organic <- strawberry_census %>% filter(Domain == "ORGANIC STATUS")
+strawberry_organic <- drop_one_value_col(strawberry_organic)
+strawberry_non_organic <- strawberry_census %>% filter(!Domain == "ORGANIC STATUS")
+strawberry_non_organic <- drop_one_value_col(strawberry_non_organic)
+
+# Split the 'survey' table into 'chemical' and 'non-chemical'
+strawberry_chemical <- strawberry_survey %>% filter(!Domain == "TOTAL")
+strawberry_chemical <- drop_one_value_col(strawberry_chemical)
+strawberry_non_chemical <- strawberry_survey %>% filter(Domain == "TOTAL")
+strawberry_non_chemical <- drop_one_value_col(strawberry_non_chemical)
+```
+
+### Estimate the NA in Value and CV(%)
+
+```{r}
+#|label: estimate missing values
+
+# Function to estimate missing values in a given dataset using linear regression
+estimate_na_values <- function(df, value_model_formula, cv_model_formula = NULL) {
+  df <- df %>% mutate(original_order = row_number())
+  # Value estimation
+  with_value <- df %>% filter(!is.na(Value))
+  missing_value <- df %>% filter(is.na(Value))
+  value_model <- lm(value_model_formula, data = with_value)
+  missing_value <- missing_value %>%
+    mutate(Value = round(exp(predict(value_model, newdata = missing_value)), 1))
+  df_filled <- bind_rows(with_value, missing_value) %>% arrange(original_order)
+  # CV estimation
+  if (!is.null(cv_model_formula)) {
+    with_cv <- df_filled %>% filter(!is.na(`CV (%)`))
+    missing_cv <- df_filled %>% filter(is.na(`CV (%)`))
+    cv_model <- lm(cv_model_formula, data = with_cv)
+    missing_cv <- missing_cv %>%
+      mutate(`CV (%)` = round(predict(cv_model, newdata = missing_cv), 2))
+    df_filled <- bind_rows(with_cv, missing_cv) %>% arrange(original_order)
+  }
+  return(df_filled %>% select(-original_order) %>% mutate(Value = round(Value, 1)))
+}
+
+# Estimate missing values for 'strawberry_organic'
+strawberry_organic <- estimate_na_values(strawberry_organic, log(Value) ~ factor(Year) + State + Category)
+
+# Estimate missing values for 'strawberry_non_organic'
+strawberry_non_organic <- estimate_na_values(strawberry_non_organic, Value ~ State + Category + Domain + `Domain Category`, `CV (%)` ~ State + Category + Domain + `Domain Category`)
+
+# Estimate missing values for 'strawberry_chemical'
+strawberry_chemical <- estimate_na_values(strawberry_chemical, log(Value) ~ factor(Year) + State + Category + Domain)
+
+# Estimate missing values for 'strawberry_non_chemical'
+strawberry_non_chemical <- estimate_na_values(strawberry_non_chemical, log(Value + 1) ~ factor(Year) + State + Category + Period)
+```
+
+### Write Cleaned Data to CSV Files
+
+```{r}
+#|label: write csv
+
+# Write cleaned datasets to new CSV files
+write.csv(strawberry_organic, "strawberry_organic.csv", row.names = FALSE)
+write.csv(strawberry_non_organic, "strawberry_non_organic.csv", row.names = FALSE)
+write.csv(strawberry_chemical, "strawberry_chemical.csv", row.names = FALSE)
+write.csv(strawberry_non_chemical, "strawberry_non_chemical.csv", row.names = FALSE)
 ```
